@@ -187,6 +187,7 @@ PO↔领域↔VO 三层分离，DB 调用统一走仓储适配器的 `blocking(.
 | 巡护任务 | `/api/tasks` | `POST` 派发（编号 `PT-YYYY-NNNN` 自动生成，也可显式指定，撞号返回业务失败不甩底层错；默认待执行）、`GET /{id}` 详情、`PUT /{id}` 改任务、`POST /{id}/start` 开工、`POST /{id}/complete` 完成回报、`POST /{id}/cancel` 取消（置已取消并逻辑销账：名单翻不到、账留在表里）、`GET` 条件分页（stationId/siteId/patrolType/status/plannedDate 全空翻整份任务，每行带任务编号） |
 | 野生动物观测 | `/api/obs` | `POST` 录入（编号 `WO-YYYY-NNNNNN` 自动生成，6 位序号，撞号重试不甩底层错；任务必须正在执行、物种必须在名录且启用、个体数量必须为正数、健康状态默认 NORMAL；照名录当前保护级别抄一份快照）、`GET /{id}` 详情、`PUT /{id}` 改录（点位/物种/数量/健康状态/观测时刻/记录人，任务归属不改；换物种重抄快照）、`POST /{id}/void` 作废（逻辑删除：清单翻不到、底子留在库）、`GET` 条件分页（taskId/siteId/speciesCode/healthStatus/观测时刻区间随意拼，每行带观测编号） |
 | 异常个体上报 | `/api/reports` | `POST` 登记（编号 `AR-YYYY-NNNN` 自动生成，撞号重试不甩底层错；只有健康状态非正常的在册观测报得了，类别须与观测健康状态对口：伤报 INJURED、死报 DEAD、疑似疫病报 SUSPECT_DISEASE；严重程度系统算不用前端填：死亡/疑似疫病一律 HIGH，受伤的看观测保护级别快照，国家一级/二级算 HIGH、其余 MEDIUM）、`GET /{id}` 详情、`POST /{id}/advance` 处置推进（REPORTED→HANDLING→RESCUED/SAMPLED→CLOSED，只顺不逆、不跳级，结案为终态，推进记下处置时刻）、`POST /{id}/void` 作废（逻辑删除：名单翻不到、账留在库，作废后该观测可重报）、`GET` 条件分页（siteId/category/severity/status 随意拼，每行带上报编号） |
+| 疫病预警 | `/api/alerts` | `POST` 发布（只递阳性样本 id，编号 `AL-YYYY-NNNN` 自动生成，撞号重试；阴性/待检/不确定立不了；级别系统按来头算不用前端填；同一样本重复递进只留一条）、`GET /{id}` 详情、`POST /{id}/handle` 处置（已发布→处置中并记下处置措施，处置中可继续补记）、`POST /{id}/resolve` 解除（处置中→已解除，落下解除时刻）、`POST /{id}/archive` 归档（已解除→已归档，终态）、`GET` 条件分页（reportId/sampleId/level/status 随意拼，每行带预警编号） |
 
 约定：
 - 编号生成「取号→落库」一体化重试（`BizNoGenerator`）：并发撞号重新取号，唯一索引兜底，
@@ -217,6 +218,17 @@ PO↔领域↔VO 三层分离，DB 调用统一走仓储适配器的 `blocking(.
   处置时刻记在审计列 update_time（表按现状用，无 handled_at 列），VO 以 handledAt 回出。
 - 上报作废是逻辑删除（del_flag=1）：分页与详情不再翻到，账留在 t_abnormal_report 备查，
   作废占用的编号不复用（取号 SQL 不拼 del_flag）。
+- 预警发布守前置：只有检测结果为阳性（POSITIVE）的在册样本立得了，阴性、待检、不确定一律拦下；
+  样本挂的上报、上报来源的观测都得在册。级别系统算：先看来源观测上抄的保护级别快照定起步档
+  （国家一级起红、国家二级起橙、省级起黄、一般起蓝），上报类别是死亡/疑似疫病的再往上抬一档
+  （蓝→黄→橙→红，红色到顶不再抬），受伤不抬；快照照观测读，不去读名录现在改成的样子。
+- 同一条阳性样本只立一条预警 —— 发布在事务内先 SELECT ... FOR UPDATE 锁住样本行再数再落，
+  8 路并发同递也只落一条，后到者收业务失败；编号 AL-YYYY-NNNN 撞号重试、占用不复用。
+- 预警状态机只顺不逆：已发布 RAISED →（处置，记处置措施）→ 处置中 HANDLING →（解除，落
+  resolved_at）→ 已解除 RESOLVED →（归档）→ 已归档 CLOSED；没处置不能直接解除，解除/归档后
+  不再收处置；处置/解除/归档都走「按原状态条件更新」，并发动同一条只有一下翻得动。
+- 预警条件分页：reportId/sampleId/level/status 随意拼、全空翻整份，PageHelper 一页一页走，
+  每行带预警编号；已逻辑删除的不出现。
 - 已在真实 MySQL 上端到端验证：69 项空库全流程用例 + 13 项存量数据（any_16_fauna 种子库）用例全部通过，
   含 10 路并发建站、8 路并发建点的编号唯一性验证。
 
