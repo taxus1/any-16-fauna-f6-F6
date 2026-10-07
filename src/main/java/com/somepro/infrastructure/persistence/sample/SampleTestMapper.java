@@ -26,4 +26,14 @@ public interface SampleTestMapper extends BaseMapper<SampleTestPO> {
     @Select("SELECT MAX(CAST(SUBSTRING(sample_no, #{seqStart}) AS UNSIGNED)) "
             + "FROM t_sample_test WHERE sample_no LIKE CONCAT(#{prefix}, '%')")
     Long selectMaxSeq(@Param("prefix") String prefix, @Param("seqStart") int seqStart);
+
+    /**
+     * 锁住一条样本记录（SELECT ... FOR UPDATE），供发布预警时把「同一条阳性样本只立一条
+     * 预警」串行化：并发发布在锁上排队，前面那条预警落库提交后，后面这单才数得到它。
+     *
+     * 自定义 @Select 不拼 del_flag：作废行的锁也取得到（作废样本早被应用层拦掉，这里只为取锁）。
+     * 必须在事务里调用，行锁随事务提交/回滚释放。
+     */
+    @Select("SELECT id FROM t_sample_test WHERE id = #{id} FOR UPDATE")
+    Long lockById(@Param("id") Long id);
 }
